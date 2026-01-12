@@ -5,7 +5,7 @@ Description=Wireguard Manager
 User=root
 
 WorkingDirectory=/opt/wag
-ExecStart=/opt/wag/wag start
+ExecStart=/usr/local/bin/wag start -c /opt/wag/config.json
 
 # If any of the ExecStart tasks fail, then ExecStopPost will run
 

@@ -234,7 +234,7 @@ class Firewall:
 
             user = self.user_policies[username]
             if user.policies is None:
-                raise ValueError("user policies map was nil")
+                raise ValueError("user policies map was None")
 
             return user.routes.copy()
 

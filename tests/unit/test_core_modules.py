@@ -3,7 +3,7 @@ import asyncio
 from ipaddress import IPv4Address
 
 from wag.internal.config import load_config, Config
-from wag.internal.data import LoginSettings, GeneralSettings, OIDC, Webserver
+from wag.internal.data import LoginSettings, GeneralSettings, OIDC, PAM, Webserver
 from wag.internal.router import Firewall, FirewallDevice
 
 
@@ -50,7 +50,7 @@ def test_data_models():
         enabled_mfa_methods=["totp", "webauthn"],
         issuer="test.example.com",
         oidc=OIDC(),
-        pam={"service_name": ""}
+        pam=PAM(service_name="")
     )
     assert login_settings.lockout == 5
     assert login_settings.issuer == "test.example.com"

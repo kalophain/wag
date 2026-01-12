@@ -68,7 +68,8 @@ packages = ["wag", "wag.commands", "wag.internal", "wag.internal.config",
             "wag.internal.data", "wag.internal.router", "wag.internal.acls",
             "wag.internal.users", "wag.internal.interfaces", "wag.internal.mfaportal",
             "wag.internal.publicwebserver", "wag.internal.autotls", "wag.internal.utils",
-            "wag.adminui", "wag.pkg", "wag.pkg.control"]
+            "wag.internal.routetypes", "wag.adminui", "wag.pkg", "wag.pkg.control",
+            "wag.pkg.fsops", "wag.pkg.queue", "wag.pkg.safedecoder"]
 
 [tool.black]
 line-length = 120

@@ -1,0 +1,835 @@
+package data
+
+import (
+	"bytes"
+	"context"
+	"crypto/rand"
+	"encoding/binary"
+	"encoding/json"
+	"encoding/pem"
+	"errors"
+	"fmt"
+	"io/fs"
+	"log"
+	"net"
+	"net/url"
+	"os"
+	"path"
+	"path/filepath"
+	"regexp"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/NHAS/autoetcdtls/manager"
+	"github.com/NHAS/wag/internal/config"
+	"github.com/NHAS/wag/internal/utils"
+	"github.com/NHAS/wag/pkg/queue"
+	_ "github.com/mattn/go-sqlite3"
+	"go.etcd.io/etcd/client/pkg/v3/types"
+	clientv3 "go.etcd.io/etcd/client/v3"
+	"go.etcd.io/etcd/client/v3/clientv3util"
+	"go.etcd.io/etcd/server/v3/embed"
+)
+
+const (
+	UsersPrefix           = "users-"
+	GroupMembershipPrefix = MembershipKey + "-"
+	AclsPrefix            = "wag-acls-"
+	GroupsPrefix          = "wag-groups-"
+	GroupsIndexPrefix     = "wag-index-groups-"
+	ConfigPrefix          = "wag-config-"
+	AuthenticationPrefix  = "wag-config-authentication-"
+	NodeInfo              = "wag/node/"
+	NodeErrors            = "wag/node/errors"
+)
+
+const (
+	dbMigrations = "wag-db-migrations"
+)
+
+var (
+	allowedTokenCharacters = regexp.MustCompile(`[a-zA-Z0-9\-\_\.]+`)
+	TLSManager             *manager.Manager
+)
+
+type database struct {
+	etcd       *clientv3.Client
+	etcdServer *embed.Etcd
+
+	contextMaps map[string]context.CancelFunc
+
+	clusterHealthLck       sync.RWMutex
+	clusterHealthListeners map[string]func(string)
+
+	eventsQueue *queue.Queue[GeneralEvent]
+	exit        chan bool
+
+	id types.ID
+}
+
+func (d *database) parseUrls(values ...string) []url.URL {
+	urls := make([]url.URL, 0, len(values))
+	for _, s := range values {
+		u, err := url.Parse(s)
+		if err != nil {
+			log.Printf("Invalid url %s: %s", s, err.Error())
+			continue
+		}
+		urls = append(urls, *u)
+	}
+	return urls
+}
+
+func Load(joinToken string, testing bool) (db *database, err error) {
+
+	db = &database{
+		contextMaps: map[string]context.CancelFunc{},
+
+		clusterHealthListeners: map[string]func(string){},
+
+		eventsQueue: queue.NewQueue[GeneralEvent](40),
+		exit:        make(chan bool),
+	}
+
+	if config.Values.RemoteCluster != nil {
+
+		idBytes := make([]byte, 8)
+		_, err := rand.Read(idBytes)
+		if err != nil {
+			return nil, fmt.Errorf("failed to generate random ID: %w", err)
+		}
+
+		db.id = types.ID(binary.BigEndian.Uint64(idBytes))
+		config, err := clientv3.NewClientConfig(config.Values.RemoteCluster, nil)
+		if err != nil {
+			return nil, fmt.Errorf("failed to make etcd client connection: %w", err)
+		}
+
+		db.etcd, err = clientv3.New(*config)
+		if err != nil {
+			return nil, err
+		}
+
+		if err := db.doMigrations(); err != nil {
+			return nil, err
+		}
+
+		err = db.loadInitialSettings()
+		if err != nil {
+			return nil, err
+		}
+
+		return db, nil
+	}
+
+	if TLSManager == nil {
+		if joinToken == "" {
+			TLSManager, err = manager.New(config.Values.Clustering.TLSManagerStorage, config.Values.Clustering.TLSManagerListenURL)
+			if err != nil {
+				return nil, fmt.Errorf("tls manager: %w", err)
+			}
+		} else {
+
+			if config.Values.Clustering.TLSManagerStorage == "" {
+				config.Values.Clustering.TLSManagerStorage = "certificates"
+			}
+
+			TLSManager, err = manager.Join(joinToken, config.Values.Clustering.TLSManagerStorage, map[string]func(name string, data string){
+				"config.json": func(name, data string) {
+					err := os.WriteFile("config.json", []byte(data), 0600)
+					if err != nil {
+						log.Fatal("failed to create config.json from other cluster members config: ", err)
+					}
+
+					log.Println("got additional, loading config file")
+					err = config.Load("config.json")
+					if err != nil {
+						log.Fatal("config supplied by other cluster member was invalid (potential version issues?): ", err)
+					}
+				},
+			})
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
+
+	part, err := utils.GenerateRandomHex(10)
+	if err != nil {
+		return nil, err
+	}
+	etcdUnixSocket := "unix:///tmp/wag.d.etcd." + part
+
+	cfg := embed.NewConfig()
+	cfg.Name = config.Values.Clustering.Name
+	if testing {
+		cfg.Name += part
+	}
+	cfg.ClusterState = config.Values.Clustering.ClusterState
+	cfg.InitialClusterToken = "wag"
+	cfg.LogLevel = config.Values.Clustering.ETCDLogLevel
+	cfg.ListenPeerUrls = db.parseUrls(config.Values.Clustering.ListenAddresses...)
+	cfg.ListenClientUrls = db.parseUrls(etcdUnixSocket)
+	cfg.AdvertisePeerUrls = cfg.ListenPeerUrls
+	// this was changed in wag 9.0.1
+	// this effectively means we can guarantee that when we use PrevKV that we will have a previous key value thus we can simplify the events watcher
+	// this will cause the compactor to run every 5 mins which may result in higher disk usage, but keeping a smaller number of keys should mean less work is done overall
+	cfg.AutoCompactionMode = "revision"
+	cfg.AutoCompactionRetention = "3"
+	cfg.SnapshotCount = 50000
+
+	cfg.PeerTLSInfo.ClientCertAuth = true
+	cfg.PeerTLSInfo.TrustedCAFile = TLSManager.GetCACertPath()
+	cfg.PeerTLSInfo.CertFile = TLSManager.GetPeerCertPath()
+	cfg.PeerTLSInfo.KeyFile = TLSManager.GetPeerKeyPath()
+
+	if _, ok := config.Values.Clustering.Peers[cfg.Name]; ok {
+		return nil, fmt.Errorf("clustering.peers contains the same name (%s) as this node this would trample something and break", cfg.Name)
+	}
+
+	peers := config.Values.Clustering.Peers
+	peers[cfg.Name] = config.Values.Clustering.ListenAddresses
+
+	cfg.InitialCluster = ""
+	for tag, addresses := range peers {
+		cfg.InitialCluster += fmt.Sprintf("%s=%s", tag, strings.Join(addresses, ",")) + ","
+	}
+
+	cfg.InitialCluster = cfg.InitialCluster[:len(cfg.InitialCluster)-1]
+
+	cfg.Dir = filepath.Join(config.Values.Clustering.DatabaseLocation, cfg.Name+".wag-node.etcd")
+	db.etcdServer, err = embed.StartEtcd(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("error starting etcd: %s", err)
+	}
+
+	select {
+	case <-db.etcdServer.Server.ReadyNotify():
+		break
+	case <-time.After(60 * time.Second):
+		db.etcdServer.Server.Stop() // trigger a shutdown
+		return nil, errors.New("etcd took too long to start")
+	}
+
+	db.etcd, err = clientv3.New(clientv3.Config{
+		Endpoints: []string{etcdUnixSocket},
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	log.Println("Successfully connected to etcd")
+
+	if !db.etcdServer.Server.IsLearner() {
+
+		// ugh duplicated code
+		if err := db.doMigrations(); err != nil {
+			return nil, err
+		}
+
+		// After first run this will be a no-op
+		err = db.loadInitialSettings()
+		if err != nil {
+			return nil, err
+		}
+
+	}
+
+	go db.checkClusterHealth()
+
+	return db, nil
+}
+
+func (d *database) GetEventQueue() []GeneralEvent {
+	return d.eventsQueue.ReadAll()
+}
+
+func (d *database) Raw() *clientv3.Client {
+	return d.etcd
+}
+
+func (d *database) doMigrations() error {
+	type migration struct {
+		version string
+		run     func() error
+	}
+
+	migrations := []migration{
+		{
+			version: "9.0.0",
+			run: func() error {
+
+				resp, err := d.etcd.Delete(context.Background(), GroupMembershipPrefix, clientv3.WithPrefix(), clientv3.WithPrevKV())
+				if err != nil {
+					return fmt.Errorf("failed to apply migration: %w", err)
+				}
+
+				ops := []clientv3.Op{}
+				for _, kv := range resp.PrevKvs {
+					key := string(kv.Key)
+					log.Printf("Migrating user(%q) membership to new group layout", key)
+					var memberCurrentGroups []string
+					err = json.Unmarshal(kv.Value, &memberCurrentGroups)
+					if err != nil {
+						log.Println("FAILED TO migrate group: ", key, err)
+						continue
+					}
+
+					parts, err := d.SplitKey(1, GroupMembershipPrefix, key)
+					if err != nil {
+						log.Println("FAILED TO migrate group: ", key, err)
+						continue
+					}
+
+					// should now be left with group membership for <username> (which is parts[0])
+					for _, group := range memberCurrentGroups {
+
+						ops = append(ops, d.generateOpsForGroupAddition(time.Now().Unix(), group, []string{parts[0]}, false, false))
+					}
+				}
+
+				if len(ops) > 0 {
+
+					txn := d.etcd.Txn(context.Background())
+					txn.Then(ops...)
+					_, err = txn.Commit()
+					if err != nil {
+						return fmt.Errorf("failed to commit migration to db: %w", err)
+					}
+				}
+
+				return nil
+			},
+		},
+		{
+			version: "9.1.1",
+			run: func() error {
+				// the previous migration did not set the group creation information or create the group index
+
+				response, err := d.etcd.Get(context.Background(), GroupsPrefix, clientv3.WithPrefix())
+				if err != nil {
+					return fmt.Errorf("unable to load all groups: %w", err)
+				}
+
+				for _, kv := range response.Kvs {
+					if bytes.Contains(kv.Key, []byte("-members-")) {
+						continue
+					}
+
+					group := strings.TrimPrefix(string(kv.Key), GroupsPrefix)
+
+					// create group now uses the group index to check if the group exists
+					// previously it used the group information
+					// the index is not created in the previous migration
+					err := d.CreateGroup(group, []string{})
+					if err != nil && !strings.Contains(err.Error(), "group already exists") {
+						return fmt.Errorf("failed to migrate group: %s: %w", group, err)
+					}
+				}
+
+				return nil
+			},
+		},
+	}
+
+	for _, action := range migrations {
+
+		migrationKey := fmt.Sprintf("%s-%q", dbMigrations, action.version)
+
+		txn := d.etcd.Txn(context.Background())
+		txn.If(clientv3util.KeyMissing(migrationKey))
+
+		resp, err := txn.Commit()
+		if err != nil {
+			return fmt.Errorf("failed to apply migration %s: %w", action.version, err)
+		}
+
+		if resp.Succeeded {
+			log.Printf("running migration: %s", action.version)
+			err = action.run()
+			if err != nil {
+				return fmt.Errorf("failed to apply migration: %s: %v", action.version, err)
+			}
+
+			Set(d.etcd, migrationKey, false, migrationKey)
+		}
+	}
+
+	return nil
+}
+
+func (d *database) loadInitialSettings() error {
+
+	response, err := d.etcd.Get(context.Background(), "wag-acls-", clientv3.WithPrefix())
+	if err != nil {
+		return err
+	}
+
+	if len(response.Kvs) == 0 {
+		log.Println("no acls found in database, importing from .json file (from this point the json file will be ignored)")
+
+		for aclName, acl := range config.Values.Acls.Policies {
+			aclJson, _ := json.Marshal(acl)
+			_, err = d.etcd.Put(context.Background(), "wag-acls-"+aclName, string(aclJson))
+			if err != nil {
+				return err
+			}
+		}
+	}
+
+	response, err = d.etcd.Get(context.Background(), GroupsPrefix, clientv3.WithPrefix())
+	if err != nil {
+		return err
+	}
+
+	if len(response.Kvs) == 0 {
+		log.Println("no groups found in database, importing from .json file (from this point the json file will be ignored)")
+
+		for groupName, members := range config.Values.Acls.Groups {
+			if err := d.CreateGroup(groupName, members); err != nil {
+				return err
+			}
+		}
+	}
+
+	configData, _ := json.Marshal(config.Values)
+	err = putIfNotFound(d.etcd, fullJsonConfigKey, string(configData), "full config")
+	if err != nil {
+		return err
+	}
+
+	err = putIfNotFound(d.etcd, helpMailKey, config.Values.Webserver.Tunnel.HelpMail, "help mail")
+	if err != nil {
+		return err
+	}
+
+	err = putIfNotFound(d.etcd, externalAddressKey, config.Values.Webserver.Public.ExternalAddress, "external wag address")
+	if err != nil {
+		return err
+	}
+
+	err = putIfNotFound(d.etcd, dnsKey, config.Values.Wireguard.DNS, "dns")
+	if err != nil {
+		return err
+	}
+
+	err = putIfNotFound(d.etcd, InactivityTimeoutKey, config.Values.Webserver.Tunnel.SessionInactivityTimeoutMinutes, "inactivity timeout")
+	if err != nil {
+		return err
+	}
+
+	err = putIfNotFound(d.etcd, SessionLifetimeKey, config.Values.Webserver.Tunnel.MaxSessionLifetimeMinutes, "max session life")
+	if err != nil {
+		return err
+	}
+
+	err = putIfNotFound(d.etcd, LockoutKey, config.Values.Webserver.Lockout, "lockout")
+	if err != nil {
+		return err
+	}
+
+	err = putIfNotFound(d.etcd, IssuerKey, config.Values.Webserver.Tunnel.Issuer, "issuer name")
+	if err != nil {
+		return err
+	}
+
+	err = putIfNotFound(d.etcd, defaultWGFileNameKey, config.Values.Webserver.Public.DownloadConfigFileName, "wireguard config file")
+	if err != nil {
+		return err
+	}
+
+	err = putIfNotFound(d.etcd, checkUpdatesKey, config.Values.CheckUpdates, "update check settings")
+	if err != nil {
+		return err
+	}
+
+	err = putIfNotFound(d.etcd, MFAMethodsEnabledKey, config.Values.Webserver.Tunnel.Methods, "authorisation methods")
+	if err != nil {
+		return err
+	}
+
+	err = putIfNotFound(d.etcd, DefaultMFAMethodKey, config.Values.Webserver.Tunnel.DefaultMethod, "default mfa method")
+	if err != nil {
+		return err
+	}
+
+	err = putIfNotFound(d.etcd, OidcDetailsKey, config.Values.Webserver.Tunnel.OIDC, "oidc settings")
+	if err != nil {
+		return err
+	}
+
+	err = putIfNotFound(d.etcd, PamDetailsKey, config.Values.Webserver.Tunnel.PAM, "pam settings")
+	if err != nil {
+		return err
+	}
+
+	err = putIfNotFound(d.etcd, AcmeEmailKey, config.Values.Webserver.Acme.Email, "acme email")
+	if err != nil {
+		return err
+	}
+
+	err = putIfNotFound(d.etcd, AcmeProviderKey, config.Values.Webserver.Acme.CAProvider, "acme provider")
+	if err != nil {
+		return err
+	}
+
+	var token CloudflareToken
+	token.APIToken = config.Values.Webserver.Acme.CloudflareDNSToken
+	err = putIfNotFound(d.etcd, AcmeDNS01CloudflareAPIToken, token, "acme cloudflare dns api token")
+	if err != nil {
+		return err
+	}
+
+	tunnelWebserverConfig := WebserverConfiguration{
+		ListenAddress: net.JoinHostPort(config.Values.Wireguard.ServerAddress.String(), config.Values.Webserver.Tunnel.Port),
+		Domain:        config.Values.Webserver.Tunnel.Domain,
+		TLS:           config.Values.Webserver.Tunnel.TLS,
+	}
+
+	if config.Values.Webserver.Tunnel.CertificatePath != "" {
+		tunnelWebserverConfig.CertificatePEM, tunnelWebserverConfig.PrivateKeyPEM, err = d.readTLSPems(config.Values.Webserver.Tunnel.CertificatePath, config.Values.Webserver.Tunnel.PrivateKeyPath)
+
+		if err != nil {
+			log.Printf("WARNING, failed to read tunnel TLS material: %s", err)
+		} else {
+			tunnelWebserverConfig.StaticCerts = true
+		}
+	}
+
+	err = putIfNotFound(d.etcd, TunnelWebServerConfigKey, tunnelWebserverConfig, "tunnel web server config")
+	if err != nil {
+		return err
+	}
+
+	publicWebserverConfig := WebserverConfiguration{
+		Domain:        config.Values.Webserver.Public.Domain,
+		TLS:           config.Values.Webserver.Public.TLS,
+		ListenAddress: config.Values.Webserver.Public.ListenAddress,
+	}
+
+	if config.Values.Webserver.Public.CertificatePath != "" {
+		publicWebserverConfig.CertificatePEM, publicWebserverConfig.PrivateKeyPEM, err = d.readTLSPems(config.Values.Webserver.Public.CertificatePath, config.Values.Webserver.Public.PrivateKeyPath)
+
+		if err != nil {
+			log.Printf("WARNING, failed to read public webserver TLS material: %s", err)
+		} else {
+			publicWebserverConfig.StaticCerts = true
+		}
+	}
+
+	err = putIfNotFound(d.etcd, PublicWebServerConfigKey, publicWebserverConfig, "public/enrolment web server config")
+	if err != nil {
+		return err
+	}
+
+	managementWebserverConfig := WebserverConfiguration{
+		Domain:        config.Values.Webserver.Management.Domain,
+		TLS:           config.Values.Webserver.Management.TLS,
+		ListenAddress: config.Values.Webserver.Management.ListenAddress,
+	}
+
+	if config.Values.Webserver.Management.CertificatePath != "" {
+
+		managementWebserverConfig.CertificatePEM, managementWebserverConfig.PrivateKeyPEM, err = d.readTLSPems(config.Values.Webserver.Management.CertificatePath, config.Values.Webserver.Management.PrivateKeyPath)
+
+		if err != nil {
+			log.Printf("WARNING, failed to read public webserver TLS material: %s", err)
+		} else {
+			managementWebserverConfig.StaticCerts = true
+		}
+	}
+
+	err = putIfNotFound(d.etcd, ManagementWebServerConfigKey, managementWebserverConfig, "management web server config")
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (d *database) readTLSPems(cert, key string) (string, string, error) {
+
+	certBytes, err := os.ReadFile(cert)
+	if err != nil {
+		return "", "", fmt.Errorf("unable to read certificate file at path %q, %w", cert, err)
+	}
+
+	p, _ := pem.Decode(certBytes)
+	if p == nil {
+		return "", "", fmt.Errorf("failed to to decode certificate %q bytes", cert)
+	}
+
+	keyBytes, err := os.ReadFile(key)
+	if err != nil {
+		return "", "", fmt.Errorf("unable to read certificate file at path %q, %w", key, err)
+	}
+
+	p, _ = pem.Decode(keyBytes)
+	if p == nil {
+		return "", "", fmt.Errorf("failed to to decode key %q bytes", cert)
+	}
+
+	return string(certBytes), string(keyBytes), nil
+}
+
+func putIfNotFound[T any](etcd *clientv3.Client, key string, value T, set string) error {
+
+	d, err := json.Marshal(value)
+	if err != nil {
+		return err
+	}
+
+	txn := etcd.Txn(context.Background())
+	resp, err := txn.If(clientv3util.KeyMissing(key)).Then(clientv3.OpPut(key, string(d))).Commit()
+	if err != nil {
+		return err
+	}
+
+	if resp.Succeeded {
+		log.Printf("setting %s from json, importing from .json file (from this point the json file will be ignored)", set)
+	}
+
+	return nil
+}
+
+func (d *database) TearDown() error {
+	close(d.exit)
+
+	if d.etcd != nil {
+		d.etcd.Close()
+		d.etcd = nil
+
+	}
+
+	if d.etcdServer != nil {
+		d.etcdServer.Close()
+		d.etcdServer = nil
+	}
+
+	return nil
+}
+
+func (d *database) doSafeUpdate(ctx context.Context, key string, create bool, mutateFunc func(*clientv3.GetResponse) (value string, err error)) error {
+	//https://github.com/kubernetes/kubernetes/blob/master/staging/src/k8s.io/apiserver/pkg/storage/etcd3/store.go#L382
+	var opts []clientv3.OpOption
+
+	if mutateFunc == nil {
+		return errors.New("no mutate function set in safe update")
+	}
+
+	origState, err := d.etcd.Get(ctx, key, opts...)
+	if err != nil {
+		return err
+	}
+
+	if create && origState.Count == 0 {
+
+		newValue, err := mutateFunc(origState)
+		if err != nil {
+			return err
+		}
+
+		txnResp, err := d.etcd.KV.Txn(ctx).If(
+			clientv3util.KeyMissing(key),
+		).Then(
+			clientv3.OpPut(key, newValue),
+		).Else(
+			clientv3.OpGet(key),
+		).Commit()
+
+		if err != nil {
+			return err
+		}
+
+		if txnResp.Succeeded {
+			return nil
+		}
+		// If the key was created while we were trying to create it, do the normal update proceedure
+
+		origState = (*clientv3.GetResponse)(txnResp.Responses[0].GetResponseRange())
+	}
+
+	for {
+		if origState.Count == 0 {
+			return errors.New("no record found")
+		}
+
+		newValue, err := mutateFunc(origState)
+		if err != nil {
+			return err
+		}
+
+		txnResp, err := d.etcd.KV.Txn(ctx).If(
+			clientv3.Compare(clientv3.ModRevision(key), "=", origState.Kvs[0].ModRevision),
+		).Then(
+			clientv3.OpPut(key, newValue),
+		).Else(
+			clientv3.OpGet(key),
+		).Commit()
+
+		if err != nil {
+			return err
+		}
+
+		if !txnResp.Succeeded {
+			origState = (*clientv3.GetResponse)(txnResp.Responses[0].GetResponseRange())
+			log.Println("Updating state failed")
+			continue
+		}
+
+		return err
+	}
+}
+
+func (d *database) GetInitialData() (users []UserModel, devices []Device, err error) {
+	txn := d.etcd.Txn(context.Background())
+	txn.Then(clientv3.OpGet(UsersPrefix, clientv3.WithPrefix(), clientv3.WithSort(clientv3.SortByKey, clientv3.SortDescend)),
+		clientv3.OpGet(DevicesPrefix, clientv3.WithPrefix(), clientv3.WithSort(clientv3.SortByKey, clientv3.SortDescend)))
+
+	resp, err := txn.Commit()
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// users
+	for _, res := range resp.Responses[0].GetResponseRange().Kvs {
+		var user UserModel
+		err := json.Unmarshal(res.Value, &user)
+		if err != nil {
+			return nil, nil, err
+		}
+
+		users = append(users, user)
+	}
+
+	//devices
+	for _, res := range resp.Responses[1].GetResponseRange().Kvs {
+		var device Device
+		err := json.Unmarshal(res.Value, &device)
+		if err != nil {
+			return nil, nil, err
+		}
+
+		devices = append(devices, device)
+	}
+
+	return
+}
+
+func (d *database) Get(key string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second*30)
+	resp, err := d.etcd.Get(ctx, key)
+	cancel()
+	if err != nil {
+		return nil, err
+	}
+
+	if resp.Count == 0 {
+		return nil, fs.ErrNotExist
+	}
+
+	return resp.Kvs[0].Value, nil
+}
+
+func (d *database) Put(key, value string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second*30)
+	_, err := d.etcd.Put(ctx, key, value)
+	cancel()
+
+	return err
+}
+
+func (d *database) SplitKey(expected int, stripPrefix, key string) ([]string, error) {
+	parts := strings.SplitN(strings.TrimPrefix(key, stripPrefix), "-", expected)
+	if len(parts) != expected {
+		return nil, fmt.Errorf("unexpected number of arguments, expected %d, got %d for key %q", expected, len(parts), key)
+	}
+
+	return parts, nil
+}
+
+func (d *database) RegisterClusterHealthListener(f func(status string)) (string, error) {
+
+	key, err := utils.GenerateRandomHex(16)
+	if err != nil {
+		return "", err
+	}
+
+	d.clusterHealthLck.Lock()
+	d.clusterHealthListeners[key] = f
+	d.clusterHealthLck.Unlock()
+
+	if d.etcdServer != nil && !d.etcdServer.Server.IsLearner() || !d.ClusterManagementEnabled() {
+		// The moment we've registered a new health listener, test the cluster so it gets a callback
+		d.testCluster()
+	}
+
+	return key, nil
+}
+
+func (d *database) checkClusterHealth() {
+
+	leaderMonitor := time.NewTicker(1 * time.Second)
+	go func() {
+		for range leaderMonitor.C {
+			if d.etcdServer.Server.Leader() == 0 {
+
+				d.notifyClusterHealthListeners("electing")
+				time.Sleep(d.etcdServer.Server.Cfg.ElectionTimeout() * 2)
+
+				if d.etcdServer.Server.Leader() == 0 {
+					d.notifyClusterHealthListeners("dead")
+				}
+			}
+		}
+	}()
+
+	clusterMonitor := time.NewTicker(30 * time.Second)
+	go func() {
+		for range clusterMonitor.C {
+			// If we're a learner we cant write to the cluster, so just wait until we're promoted
+			if !d.etcdServer.Server.IsLearner() {
+				d.testCluster()
+			}
+		}
+	}()
+
+	<-d.exit
+
+	log.Println("etcd server was instructed to terminate")
+	leaderMonitor.Stop()
+	clusterMonitor.Stop()
+
+}
+
+func (d *database) testCluster() {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+
+	_, err := d.etcd.Put(ctx, path.Join(NodeInfo, d.GetCurrentNodeID().String(), "ping"), time.Now().Format(time.RFC1123Z))
+	cancel()
+	if err != nil {
+		log.Println("unable to write liveness value")
+		d.notifyClusterHealthListeners("dead")
+		return
+	}
+
+	d.notifyHealthy()
+}
+
+func (d *database) notifyHealthy() {
+	if d.etcdServer != nil && d.etcdServer.Server.IsLearner() {
+		d.notifyClusterHealthListeners("learner")
+	} else {
+		d.notifyClusterHealthListeners("healthy")
+	}
+}
+
+func (d *database) notifyClusterHealthListeners(event string) {
+	d.clusterHealthLck.RLock()
+	defer d.clusterHealthLck.RUnlock()
+
+	for _, f := range d.clusterHealthListeners {
+		go f(event)
+	}
+}

@@ -32,24 +32,28 @@ def decoder(stream: IO[bytes]) -> json.JSONDecoder:
 
 def decode_strict(stream: IO[bytes], model: type[T]) -> T:
     """
-    Decode JSON from stream with strict field validation using a Pydantic model.
+    Decode JSON from stream with validation using a model/dataclass.
 
-    This provides functionality similar to Go's DisallowUnknownFields() by using
-    Pydantic models which reject unknown fields by default.
+    Note: This is a basic implementation that validates against Python
+    dataclasses or simple classes. For strict field validation that
+    rejects unknown fields, integrate with Pydantic models which provide
+    this functionality by default.
 
     Args:
         stream: Input stream to read JSON from
-        model: Pydantic model class to validate against
+        model: Model class (dataclass, Pydantic model, etc.) to validate against
 
     Returns:
         Instance of the model with validated data
 
     Raises:
-        ValidationError: If JSON doesn't match model or has unknown fields
+        TypeError: If data doesn't match model signature
+        ValueError: If JSON is invalid
 
     Example:
-        >>> from pydantic import BaseModel
-        >>> class MyModel(BaseModel):
+        >>> from dataclasses import dataclass
+        >>> @dataclass
+        ... class MyModel:
         ...     name: str
         >>> import io
         >>> stream = io.BytesIO(b'{"name": "test"}')

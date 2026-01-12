@@ -29,6 +29,7 @@ _global_cache: dict[str, list[Rule]] = {}
 # DNS cache for domain resolution
 _dns_lock = threading.RLock()
 _dns_cache: dict[str, tuple[float, list[ipaddress.IPv4Network | ipaddress.IPv6Network]]] = {}
+DNS_CACHE_TTL = 3.0  # DNS cache time-to-live in seconds
 
 
 def _hash_rules(mfa: list[str], public: list[str], deny: list[str]) -> str:
@@ -268,7 +269,7 @@ def _parse_address(address: str) -> list[ipaddress.IPv4Network | ipaddress.IPv6N
     with _dns_lock:
         if address in _dns_cache:
             cache_time, cached_addresses = _dns_cache[address]
-            if time.time() - cache_time < 3.0:  # 3 second cache
+            if time.time() - cache_time < DNS_CACHE_TTL:
                 return cached_addresses
 
     # Perform DNS lookup

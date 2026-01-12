@@ -137,9 +137,9 @@ class User:
         """Disable MFA enforcement for the user."""
         await self.db.set_enforce_mfa_off(self.username)
 
-    def is_enforcing_mfa(self) -> bool:
+    async def is_enforcing_mfa(self) -> bool:
         """Check if MFA is being enforced."""
-        return self.db.is_enforcing_mfa(self.username)
+        return await self.db.is_enforcing_mfa(self.username)
 
     async def delete(self) -> None:
         """Delete the user."""
@@ -182,7 +182,7 @@ class User:
         authenticator(mfa, self.username)
 
         # Device successfully authenticated
-        if not self.is_enforcing_mfa():
+        if not await self.is_enforcing_mfa():
             await self.enforce_mfa()
 
         await self.db.authorise_device(self.username, device)

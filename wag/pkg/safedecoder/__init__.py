@@ -1,5 +1,5 @@
 """Safe JSON decoding utilities."""
 
-from .safe import decoder
+from .safe import decoder, decode_strict
 
-__all__ = ["decoder"]
+__all__ = ["decoder", "decode_strict"]

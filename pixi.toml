@@ -1,0 +1,33 @@
+[project]
+name = "wag"
+version = "7.0.0"
+description = "Wag adds MFA, route restriction and device enrolment to WireGuard"
+channels = ["conda-forge"]
+platforms = ["linux-64"]
+
+[tasks]
+install = "pip install -e ."
+dev-install = "pip install -e '.[dev]'"
+test = "pytest tests/"
+lint = "ruff check wag/"
+format = "black wag/"
+type-check = "mypy wag/"
+start = "wag start"
+build = "python -m build"
+
+[dependencies]
+python = ">=3.11,<3.13"
+pip = ">=24.0"
+
+[feature.dev.dependencies]
+pytest = ">=8.3.4"
+pytest-asyncio = ">=0.24.0"
+pytest-cov = ">=6.0.0"
+black = ">=24.10.0"
+ruff = ">=0.8.4"
+mypy = ">=1.13.0"
+build = ">=1.2.2"
+
+[environments]
+default = {features = [], solve-group = "default"}
+dev = {features = ["dev"], solve-group = "default"}

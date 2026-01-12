@@ -6,7 +6,7 @@ readme = "README.md"
 requires-python = ">=3.11"
 license = {text = "AGPL-3.0"}
 authors = [
-    {name = "NHAS", email = ""},
+    {name = "NHAS"},
 ]
 keywords = ["wireguard", "vpn", "mfa", "2fa", "security", "authentication"]
 classifiers = [
@@ -42,7 +42,7 @@ dependencies = [
     "aiofiles>=24.1.0",
     "jinja2>=3.1.4",
     "websockets>=14.1",
-    "py-etcd>=3.0.0",
+    "python-etcd>=0.4.5",
 ]
 
 [project.optional-dependencies]

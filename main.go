@@ -98,6 +98,3 @@ func main() {
 	if err := root(os.Args[1:]); err != nil {
 		log.Println(err)
 		os.Exit(1)
-	}
-
-}

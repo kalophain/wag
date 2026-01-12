@@ -102,15 +102,17 @@ chmod o+x wag
 sudo ./wag start -config <generated_config_name>
 ```
   
-From source (will require `go1.23.1`, `npm`):  
+From source (requires Python 3.11+, pip, npm):  
 ```sh
 git clone git@github.com:NHAS/wag.git
 cd wag
-make
+pip install -e .
+make .build_ui
 
 cp example_config.json config.json
+# Edit config.json and update the PrivateKey with output from: wg genkey
 
-sudo ./wag start
+sudo wag start -c config.json
 ```
 
 # Management
@@ -648,20 +650,22 @@ Example:
 
 ```sh
 export DEV_API_URL=http://127.0.0.1:4433
-make debug
-sudo ./wag start -config docker-test-config.json
+make install
+make .build_ui
+sudo wag start -c docker-test-config.json
 ```
 
 ## Testing
 ```sh
-cd internal/router
-sudo go test -v .
+pytest tests/
+# Or run specific test modules
+pytest tests/test_specific_module.py -v
 ```
 
 ## External contributions
 
 If you're looking to add your own features, or bug fixes to wag (thank you!). Please make sure that you've written a test for your changes if possible.  
-There are a few `_test.go` files around that give example on how to do this.  
+Tests are located in the `tests/` directory using pytest.
 
 Then open a pull request and we can discuss it there.  
 

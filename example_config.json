@@ -1,0 +1,134 @@
+{
+    "Socket": "/tmp/wag.sock",
+    "NumberProxies": 0,
+    "ExposePorts": [
+        "443/tcp",
+        "100-200/udp"
+     ],
+    "NAT": true,
+    "Webserver": {
+        "Lockout": 5,
+
+        "Tunnel": {
+            "Domain": "vpn.test",
+            "Port": "8080",
+
+            "MaxSessionLifetimeMinutes": 2,
+            "SessionInactivityTimeoutMinutes": 1,
+
+            "HelpMail": "help@example.com",
+
+            "DefaultMethod": "totp",
+            "Issuer": "vpn.test",
+            "Methods": [
+                "totp"
+            ],
+            "OIDC": {
+                "IssuerURL": "",
+                "ClientSecret": "",
+                "ClientID": "",
+                "GroupsClaimName": "",
+                "DeviceUsernameClaim": "",
+                "Scopes": []
+            },
+            "PAM": {
+                "ServiceName": ""
+            }
+        },
+
+        "Public": {
+            "ListenAddress": ":8081",
+         
+
+            "ExternalAddress": "192.168.121.61",
+            "DownloadConfigFileName": "wg0.conf"
+
+        },
+        "Management": {
+            "Enabled": true,
+            "ListenAddress": "127.0.0.1:4433",
+            "Password": {
+                "Enabled": true
+            },
+            "OIDC": {
+                "IssuerURL": "",
+                "ClientSecret": "",
+                "ClientID": "",
+                "Enabled": false
+            }
+        }
+    },
+
+    "Wireguard": {
+        "DevName": "wg1",
+        "ListenPort": 53230,
+        "PrivateKey": "CHANGE_ME_GENERATE_WITH_wg_genkey",
+        "Address": "192.168.122.1/24",
+        "ServerPersistentKeepAlive": 0
+    },
+    "Clustering": {
+        "ClusterState": "new",
+        "ETCDLogLevel": "error",
+        "ListenAddresses": [
+            "https://127.0.0.1:2380"
+        ],
+        "TLSManagerListenURL": "https://127.0.0.1:3434",
+        "DatabaseLocation": "/data"
+    },
+    "Acls": {
+        "Groups": {
+            "group:administrators": [
+                "toaster",
+                "tester"
+            ],
+            "group:nerds": [
+                "toaster",
+                "tester",
+                "abc"
+            ]
+        },
+        "Policies": {
+            "*": {
+                "Mfa": [
+                    "1.1.1.1",
+                    "12.2.3.2",
+                    "22.22.22.2",
+                    "33.33.33.33",
+                    "4.4.5.5",
+                    "5.5.5.5"
+                ],
+                "Allow": [
+                    "7.7.7.7",
+                    "google.com"
+                ]
+            },
+            "group:administrators": {
+                "Mfa": [
+                    "8.8.8.8"
+                ]
+            },
+            "group:nerds": {
+                "Mfa": [
+                    "192.168.3.4/32"
+                ],
+                "Allow": [
+                    "192.168.3.5/32"
+                ]
+            },
+            "tester": {
+                "Mfa": [
+                    "192.168.3.0/24",
+                    "192.168.5.0/24"
+                ],
+                "Allow": [
+                    "4.3.3.3/32"
+                ]
+            },
+            "toaster": {
+                "Allow": [
+                    "1.1.1.1/32"
+                ]
+            }
+        }
+    }
+}

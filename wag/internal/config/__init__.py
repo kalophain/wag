@@ -1,16 +1,44 @@
-"""Configuration management stub - full implementation needed."""
-from typing import Any
+"""Configuration management for Wag."""
+from .config import (
+    AcmeConfig,
+    AclPolicy,
+    AclsConfig,
+    ClusteringConfig,
+    Config,
+    ManagementOIDCConfig,
+    ManagementPasswordConfig,
+    ManagementWebserverConfig,
+    OIDCConfig,
+    PAMConfig,
+    PublicWebserverConfig,
+    TunnelWebserverConfig,
+    WebserverConfig,
+    WebserverDetails,
+    WireguardConfig,
+    get_config,
+    load_and_set_config,
+    load_config,
+    set_config,
+)
 
-class Config:
-    """Configuration placeholder."""
-    def __init__(self, **kwargs):
-        for key, value in kwargs.items():
-            setattr(self, key, value)
-
-def load_config(path: str) -> Config:
-    """Load configuration - stub implementation."""
-    import json
-    with open(path, 'r') as f:
-        data = json.load(f)
-    # Create nested object structure
-    return Config(**data)
+__all__ = [
+    "AcmeConfig",
+    "AclPolicy",
+    "AclsConfig",
+    "ClusteringConfig",
+    "Config",
+    "ManagementOIDCConfig",
+    "ManagementPasswordConfig",
+    "ManagementWebserverConfig",
+    "OIDCConfig",
+    "PAMConfig",
+    "PublicWebserverConfig",
+    "TunnelWebserverConfig",
+    "WebserverConfig",
+    "WebserverDetails",
+    "WireguardConfig",
+    "get_config",
+    "load_and_set_config",
+    "load_config",
+    "set_config",
+]

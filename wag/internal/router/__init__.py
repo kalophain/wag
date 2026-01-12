@@ -1,10 +1,18 @@
-"""Router/WireGuard management stub."""
-class Router:
-    def __init__(self, config, db, no_iptables=False):
-        self.config = config
-        self.db = db
-        self.no_iptables = no_iptables
-    async def start(self):
-        pass
-    async def stop(self):
-        pass
+"""Router/WireGuard management for Wag."""
+from .firewall import (
+    Firewall,
+    FirewallDevice,
+    Policies,
+    Router,
+    new_debug_firewall,
+    new_firewall,
+)
+
+__all__ = [
+    "Firewall",
+    "FirewallDevice",
+    "Policies",
+    "Router",
+    "new_debug_firewall",
+    "new_firewall",
+]

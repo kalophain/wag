@@ -222,10 +222,11 @@ class Config(BaseModel):
         try:
             network = ip_network(self.wireguard.address, strict=False)
             self.wireguard.network_range = network
-            # Server address is the network address
-            self.wireguard.server_address = str(
-                list(network.hosts())[0] if network.num_addresses > 2 else network.network_address
-            )
+            # Server address is the first host in the network
+            if network.num_addresses > 2:
+                self.wireguard.server_address = str(next(network.hosts()))
+            else:
+                self.wireguard.server_address = str(network.network_address)
         except Exception as e:
             raise ValueError(f"wireguard address invalid: {e}")
 

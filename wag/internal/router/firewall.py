@@ -142,10 +142,9 @@ class Firewall:
             address: Network address
             mtu: MTU size
         """
-        # This would interface with the WireGuard kernel module or userspace implementation
-        # For now, this is a placeholder
+        # TODO: Interface with the WireGuard kernel module or userspace implementation
         logger.info(f"[ROUTER] Setting up WireGuard device {device_name}")
-        pass
+        raise NotImplementedError("WireGuard setup not yet implemented")
 
     async def _setup_wireguard_debug(self, test_dev: Any) -> None:
         """Setup WireGuard in debug mode.
@@ -154,6 +153,7 @@ class Firewall:
             test_dev: Test device
         """
         logger.info("[ROUTER] Setting up WireGuard in debug mode")
+        # Debug mode doesn't require actual WireGuard setup
         pass
 
     async def _setup_users(self, users: Any) -> None:
@@ -162,8 +162,8 @@ class Firewall:
         Args:
             users: User data
         """
-        # Process and setup users
-        pass
+        # TODO: Process and setup users from database
+        raise NotImplementedError("User setup not yet implemented")
 
     async def _setup_devices(self, devices: Any) -> None:
         """Setup devices from initial data.
@@ -171,23 +171,23 @@ class Firewall:
         Args:
             devices: Device data
         """
-        # Process and setup devices
-        pass
+        # TODO: Process and setup devices from database
+        raise NotImplementedError("Device setup not yet implemented")
 
     async def _setup_iptables(self) -> None:
         """Setup iptables rules."""
-        # Configure iptables/nftables
-        pass
+        # TODO: Configure iptables/nftables rules
+        raise NotImplementedError("iptables setup not yet implemented")
 
     async def _teardown_iptables(self) -> None:
         """Teardown iptables rules."""
-        # Remove iptables/nftables rules
-        pass
+        # TODO: Remove iptables/nftables rules
+        raise NotImplementedError("iptables teardown not yet implemented")
 
     async def _handle_events(self) -> None:
         """Setup event handlers for database changes."""
-        # Setup watchers for database events
-        pass
+        # TODO: Setup watchers for database events
+        raise NotImplementedError("Event handling not yet implemented")
 
     async def close(self) -> None:
         """Close the firewall and cleanup resources."""

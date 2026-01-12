@@ -247,21 +247,22 @@ def domain_to_url(domain: str, listen_address: str, is_tls: bool) -> str:
     url = scheme + domain
 
     # Check if domain has a port
+    domain_port = None
     try:
-        _, port = domain.rsplit(":", 1)
+        _, domain_port = domain.rsplit(":", 1)
     except ValueError:
         # No port in domain, try to get from listen address
         try:
-            _, port = listen_address.rsplit(":", 1)
-            url = url + ":" + port
+            _, domain_port = listen_address.rsplit(":", 1)
+            url = url + ":" + domain_port
         except ValueError:
             # No port in listen address either
             return url
 
     # Remove default ports
-    if is_tls and url.endswith(":443"):
-        url = url[:-4]
-    elif not is_tls and url.endswith(":80"):
-        url = url[:-3]
+    if is_tls and domain_port == "443":
+        url = url.replace(":443", "")
+    elif not is_tls and domain_port == "80":
+        url = url.replace(":80", "")
 
     return url

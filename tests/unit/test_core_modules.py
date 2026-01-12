@@ -93,6 +93,7 @@ def test_router_classes():
         async def get_initial_data(self):
             return {}, {}
     
+    # Firewall can be instantiated (initialization is separate)
     firewall = Firewall(MockDB(), has_iptables=False, testing=True)
     assert firewall.testing is True
     assert firewall.closed is False
@@ -110,9 +111,10 @@ async def test_router_async():
         async def get_initial_data(self):
             return {}, {}
     
+    # Firewall can be instantiated without full initialization
     firewall = Firewall(MockDB(), has_iptables=False, testing=True)
     
-    # Test set_inactivity_timeout
+    # Test set_inactivity_timeout (this method is implemented)
     await firewall.set_inactivity_timeout(60)
     assert firewall.inactivity_timeout.total_seconds() == 3600
     

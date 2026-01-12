@@ -1,4 +1,5 @@
-wag
+/wag
+!wag/
 devices.db
 config.json
 adminui/src/css/sb-admin-2.css
